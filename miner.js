@@ -83,9 +83,17 @@ function runGpuMiner(challengeHex, difficultyHex, startNonce, signal) {
     console.log(`  Grid: ${GPU_GRID} blocks x ${GPU_BLOCK} threads = ${parseInt(GPU_GRID) * parseInt(GPU_BLOCK)} threads/batch`);
 
     const { spawn } = require("child_process");
-    const proc = spawn(MINER_BIN, args, { signal });
+    const proc = spawn(MINER_BIN, args);
     let stdoutData = "";
     let stderrData = "";
+    let aborted = false;
+
+    // Handle abort signal (challenge changed)
+    const onAbort = () => {
+      aborted = true;
+      proc.kill("SIGKILL");
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
 
     proc.stdout.on("data", (data) => {
       stdoutData += data.toString();
@@ -98,6 +106,13 @@ function runGpuMiner(challengeHex, difficultyHex, startNonce, signal) {
     });
 
     proc.on("close", (code) => {
+      signal.removeEventListener("abort", onAbort);
+
+      if (aborted) {
+        reject(new Error("CHALLENGE_UPDATED"));
+        return;
+      }
+
       if (code !== 0) {
         reject(new Error(`GPU miner error code ${code}\n${stderrData}`));
         return;
@@ -113,11 +128,8 @@ function runGpuMiner(challengeHex, difficultyHex, startNonce, signal) {
     });
 
     proc.on("error", (err) => {
-      if (err.name === "AbortError") {
-        reject(new Error("CHALLENGE_UPDATED"));
-      } else {
-        reject(new Error(`Failed to start GPU miner: ${err.message}`));
-      }
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error(`Failed to start GPU miner: ${err.message}`));
     });
   });
 }
@@ -162,7 +174,7 @@ async function main() {
       const ac = new AbortController();
       const signal = ac.signal;
 
-      // Background polling
+      // Background polling - check every 2s if someone else mined this epoch
       const pollInterval = setInterval(async () => {
         try {
           const currentChallenge = await contract.getChallenge(wallet.address);
@@ -173,7 +185,7 @@ async function main() {
         } catch (err) {
           // ignore network errors during polling
         }
-      }, 5000);
+      }, 2000);
 
       const startTime = Date.now();
       let nonce;
