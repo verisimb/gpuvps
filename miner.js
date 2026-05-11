@@ -241,7 +241,6 @@ async function main() {
         console.log("Continuing to next round...");
         continue;
       }
-      }
       console.error("Error:", err.shortMessage || err.message);
       console.log("Retrying in 5s...");
       await new Promise(r => setTimeout(r, 5000));
