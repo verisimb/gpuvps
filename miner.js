@@ -75,7 +75,7 @@ function difficultyToHex(difficulty) {
   return hex;
 }
 
-function runGpuMiner(challengeHex, difficultyHex, startNonce) {
+function runGpuMiner(challengeHex, difficultyHex, startNonce, signal) {
   return new Promise((resolve, reject) => {
     const args = [challengeHex, difficultyHex, startNonce.toString(), GPU_GRID, GPU_BLOCK];
 
@@ -83,7 +83,7 @@ function runGpuMiner(challengeHex, difficultyHex, startNonce) {
     console.log(`  Grid: ${GPU_GRID} blocks x ${GPU_BLOCK} threads = ${parseInt(GPU_GRID) * parseInt(GPU_BLOCK)} threads/batch`);
 
     const { spawn } = require("child_process");
-    const proc = spawn(MINER_BIN, args);
+    const proc = spawn(MINER_BIN, args, { signal });
     let stdoutData = "";
     let stderrData = "";
 
@@ -113,7 +113,11 @@ function runGpuMiner(challengeHex, difficultyHex, startNonce) {
     });
 
     proc.on("error", (err) => {
-      reject(new Error(`Failed to start GPU miner: ${err.message}`));
+      if (err.name === "AbortError") {
+        reject(new Error("CHALLENGE_UPDATED"));
+      } else {
+        reject(new Error(`Failed to start GPU miner: ${err.message}`));
+      }
     });
   });
 }
@@ -155,8 +159,30 @@ async function main() {
       // Random start nonce to avoid collisions with other miners
       const startNonce = Math.floor(Math.random() * 1_000_000_000_000);
 
+      const ac = new AbortController();
+      const signal = ac.signal;
+
+      // Background polling
+      const pollInterval = setInterval(async () => {
+        try {
+          const currentChallenge = await contract.getChallenge(wallet.address);
+          if (currentChallenge !== challenge) {
+            console.log("\n[!] Challenge updated by network. Aborting stale round...");
+            ac.abort();
+          }
+        } catch (err) {
+          // ignore network errors during polling
+        }
+      }, 5000);
+
       const startTime = Date.now();
-      const nonce = await runGpuMiner(challengeHex, difficultyHex, startNonce);
+      let nonce;
+      try {
+        nonce = await runGpuMiner(challengeHex, difficultyHex, startNonce, signal);
+      } finally {
+        clearInterval(pollInterval);
+      }
+
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
 
       console.log(`\nFOUND nonce: ${nonce.toString()} (${elapsed}s)`);
@@ -190,6 +216,9 @@ async function main() {
       }
 
     } catch (err) {
+      if (err.message === "CHALLENGE_UPDATED") {
+        continue;
+      }
       console.error("Error:", err.shortMessage || err.message);
       console.log("Retrying in 5s...");
       await new Promise(r => setTimeout(r, 5000));
