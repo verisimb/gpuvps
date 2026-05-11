@@ -125,18 +125,25 @@ __device__ __forceinline__ void keccak_f1600(uint64_t state[25]) {
 }
 
 // Compare hash (big-endian uint256) < difficulty (big-endian uint256).
-// Hash is stored as 4 little-endian uint64 lanes, but since we compare
-// big-endian byte representation, we work with bswap'd values lane by lane.
-__device__ __forceinline__ bool hash_lt_diff(uint64_t h0, uint64_t h1, uint64_t h2, uint64_t h3,
-                                             uint64_t d0, uint64_t d1, uint64_t d2, uint64_t d3) {
-    if (h0 != d0) return h0 < d0;
-    if (h1 != d1) return h1 < d1;
-    if (h2 != d2) return h2 < d2;
-    return h3 < d3;
+// Keccak output: byte 0 = LSB of lane 0, byte 7 = MSB of lane 0, byte 8 = LSB of lane 1, etc.
+// When cast to uint256, byte 0 is the MOST significant byte.
+// So we compare: lane0 LSB first (most significant), then lane0 next byte, etc.
+// This is equivalent to comparing the raw output bytes from index 0 to 31.
+__device__ __forceinline__ bool hash_less_than_diff(const uint64_t *state, const uint8_t *difficulty) {
+    for (int i = 0; i < 4; i++) {
+        uint64_t lane = state[i];
+        for (int j = 0; j < 8; j++) {
+            uint8_t hbyte = (uint8_t)(lane >> (j * 8));
+            uint8_t dbyte = difficulty[i * 8 + j];
+            if (hbyte < dbyte) return true;
+            if (hbyte > dbyte) return false;
+        }
+    }
+    return false;
 }
 
 __global__ void __launch_bounds__(256, 4) mine_kernel(
-    const uint64_t *difficulty_be,
+    const uint8_t *difficulty,   // 32 bytes big-endian
     uint64_t start_nonce,
     uint64_t *result_nonce,
     int *found
@@ -152,12 +159,6 @@ __global__ void __launch_bounds__(256, 4) mine_kernel(
     #pragma unroll
     for (int i = 0; i < 25; i++) base[i] = BASE_STATE[i];
 
-    // Unpack difficulty (big-endian representation of uint256)
-    uint64_t d0 = difficulty_be[0];
-    uint64_t d1 = difficulty_be[1];
-    uint64_t d2 = difficulty_be[2];
-    uint64_t d3 = difficulty_be[3];
-
     #pragma unroll
     for (int k = 0; k < HASHES_PER_THREAD; k++) {
         uint64_t nonce = base_nonce + k;
@@ -172,13 +173,7 @@ __global__ void __launch_bounds__(256, 4) mine_kernel(
 
         keccak_f1600(state);
 
-        // Extract hash as big-endian uint64 words (top word first)
-        uint64_t h0 = bswap64(state[0]);
-        uint64_t h1 = bswap64(state[1]);
-        uint64_t h2 = bswap64(state[2]);
-        uint64_t h3 = bswap64(state[3]);
-
-        if (hash_lt_diff(h0, h1, h2, h3, d0, d1, d2, d3)) {
+        if (hash_less_than_diff(state, difficulty)) {
             int old = atomicCAS(found, 0, 1);
             if (old == 0) {
                 *result_nonce = nonce;
@@ -237,16 +232,8 @@ static void compute_base_state(const uint8_t *challenge, uint64_t base_state[25]
     base_state[16] ^= 0x8000000000000000ULL;
 }
 
-// Convert big-endian 32-byte difficulty into 4 big-endian uint64 words
-static void difficulty_to_be_words(const uint8_t *diff, uint64_t out[4]) {
-    for (int i = 0; i < 4; i++) {
-        uint64_t w = 0;
-        for (int j = 0; j < 8; j++) {
-            w = (w << 8) | diff[i * 8 + j];
-        }
-        out[i] = w;
-    }
-}
+// Convert big-endian 32-byte difficulty - just pass as-is (bytes)
+// No conversion needed since kernel compares byte-by-byte
 
 int main(int argc, char **argv) {
     if (argc < 3) {
@@ -281,25 +268,23 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[GPU %d] %s | SMs: %d | HPT: %d\n",
             device_id, prop.name, prop.multiProcessorCount, HASHES_PER_THREAD);
 
-    // Precompute base state and difficulty words
+    // Precompute base state
     uint64_t h_base_state[25];
-    uint64_t h_diff_words[4];
     compute_base_state(challenge, h_base_state);
-    difficulty_to_be_words(difficulty, h_diff_words);
 
     // Copy to constant memory
     cudaMemcpyToSymbol(BASE_STATE, h_base_state, 25 * sizeof(uint64_t));
 
     // Allocate device buffers
-    uint64_t *d_diff_words;
+    uint8_t *d_difficulty;
     uint64_t *d_result_nonce;
     int *d_found;
 
-    cudaMalloc(&d_diff_words, 4 * sizeof(uint64_t));
+    cudaMalloc(&d_difficulty, 32);
     cudaMalloc(&d_result_nonce, sizeof(uint64_t));
     cudaMalloc(&d_found, sizeof(int));
 
-    cudaMemcpy(d_diff_words, h_diff_words, 4 * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_difficulty, difficulty, 32, cudaMemcpyHostToDevice);
 
     int found = 0;
     uint64_t result_nonce = 0;
@@ -318,7 +303,7 @@ int main(int argc, char **argv) {
 
     while (!found) {
         mine_kernel<<<grid_size, block_size>>>(
-            d_diff_words, start_nonce, d_result_nonce, d_found
+            d_difficulty, start_nonce, d_result_nonce, d_found
         );
 
         cudaError_t err = cudaGetLastError();
@@ -357,7 +342,7 @@ int main(int argc, char **argv) {
             device_id, (unsigned long long)result_nonce,
             (unsigned long long)(total_hashes / 1000000), final_mhs, total_time);
 
-    cudaFree(d_diff_words);
+    cudaFree(d_difficulty);
     cudaFree(d_result_nonce);
     cudaFree(d_found);
 
