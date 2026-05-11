@@ -202,12 +202,28 @@ async function main() {
       console.log("Hash:", hash);
       console.log("Verified locally OK");
 
-      // Submit transaction
+      // Submit transaction with competitive gas
       console.log("Submitting mine(nonce) tx...");
-      const tx = await contract.mine(nonce);
+
+      const feeData = await provider.getFeeData();
+      const maxPriorityFee = feeData.maxPriorityFeePerGas * 2n; // 2x priority for speed
+      const maxFee = feeData.maxFeePerGas * 2n;
+
+      console.log(`  Gas: maxFee=${ethers.formatUnits(maxFee, "gwei")} gwei, priority=${ethers.formatUnits(maxPriorityFee, "gwei")} gwei`);
+
+      const tx = await contract.mine(nonce, {
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: maxPriorityFee,
+        gasLimit: 200000n,
+      });
       console.log("TX sent:", tx.hash);
 
-      const receipt = await tx.wait();
+      // Wait with timeout (60s max)
+      const receipt = await Promise.race([
+        tx.wait(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("TX_TIMEOUT")), 60000))
+      ]);
+
       if (receipt.status === 1) {
         console.log("SUCCESS! Block:", receipt.blockNumber);
         console.log("Gas used:", receipt.gasUsed.toString());
@@ -217,7 +233,14 @@ async function main() {
 
     } catch (err) {
       if (err.message === "CHALLENGE_UPDATED") {
+        console.log("Challenge changed, restarting mining...");
         continue;
+      }
+      if (err.message === "TX_TIMEOUT") {
+        console.log("TX pending too long (60s). Challenge mungkin sudah berubah.");
+        console.log("Continuing to next round...");
+        continue;
+      }
       }
       console.error("Error:", err.shortMessage || err.message);
       console.log("Retrying in 5s...");
