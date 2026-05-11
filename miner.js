@@ -4,11 +4,20 @@ const { ethers } = require("ethers");
 const { spawn, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const https = require("https");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const RPC_URL = process.env.RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = "0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc";
+
+// Telegram config
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "8613318244:AAEA1Dv_4xxsAsEH9dV_v4eboS6LHQuAtoQ";
+const TG_CHAT_ID = process.env.TG_CHAT_ID || "1759703621";
+
+// Gas strategy: how aggressive to bid
+const GAS_MULTIPLIER = BigInt(process.env.GAS_MULTIPLIER || "5"); // 5x priority fee
+const GAS_TIP_GWEI = process.env.GAS_TIP_GWEI; // optional: fixed tip in gwei
 
 const MINER_BIN = path.join(__dirname, process.platform === "win32" ? "keccak_miner.exe" : "keccak_miner");
 const QUERY_BIN = path.join(__dirname, process.platform === "win32" ? "device_query.exe" : "device_query");
@@ -18,6 +27,43 @@ const ABI = [
   "function miningState() view returns (uint256 era,uint256 reward,uint256 difficulty,uint256 minted,uint256 remaining,uint256 epoch,uint256 epochBlocksLeft_)",
   "function mine(uint256 nonce)"
 ];
+
+// ─── Telegram ─────────────────────────────────────────────────────────────────
+function sendTelegram(message) {
+  return new Promise((resolve) => {
+    const data = JSON.stringify({ chat_id: TG_CHAT_ID, text: message, parse_mode: "HTML" });
+    const options = {
+      hostname: "api.telegram.org",
+      path: `/bot${TG_BOT_TOKEN}/sendMessage`,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+    };
+    const req = https.request(options, (res) => {
+      res.resume();
+      resolve();
+    });
+    req.on("error", () => resolve()); // don't crash on telegram failure
+    req.write(data);
+    req.end();
+  });
+}
+
+async function notifySuccess(block, gasUsed, txHash, reward, elapsed) {
+  const msgs = [
+    `🏆 <b>HASH MINED!</b>\n\nBlock: ${block}\nReward: ${reward} HASH\nTime: ${elapsed}s\nGas: ${gasUsed}`,
+    `🔗 TX: https://etherscan.io/tx/${txHash}`,
+    `⛏️ Mining continues...`,
+    `📊 Stats update coming soon`,
+    `✅ All systems operational`,
+  ];
+
+  for (let i = 0; i < msgs.length; i++) {
+    await sendTelegram(msgs[i]);
+    if (i < msgs.length - 1) {
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function requireEnv() {
@@ -65,7 +111,6 @@ function detectGpus() {
     }
   } catch (err) {
     console.error("Failed to detect GPUs:", err.message);
-    // Fallback: assume 1 GPU
     gpus = [{ id: 0, name: "Unknown", smCount: 64, maxThreads: 1024 }];
   }
 
@@ -73,11 +118,7 @@ function detectGpus() {
 }
 
 function getGpuConfig(gpu) {
-  // Optimal config for RTX 5090: 192 SMs, so we want massive parallelism
-  // Rule: grid = smCount * 128 (high occupancy), block = 256 (sweet spot)
   const blockSize = Math.min(256, gpu.maxThreads);
-  // For RTX 5090 (192 SMs): 192 * 128 = 24576 blocks -> 24576 * 256 = 6.3M threads/batch
-  // This keeps the GPU fully saturated
   const gridSize = gpu.smCount * 128;
   return { gridSize, blockSize };
 }
@@ -122,10 +163,7 @@ function launchGpuWorker(deviceId, challengeHex, difficultyHex, startNonce, grid
 
 function runMultiGpuMiner(gpus, challengeHex, difficultyHex, signal) {
   return new Promise((resolve, reject) => {
-    // Each GPU gets a different nonce range (far apart to avoid overlap)
-    // With 2 GPUs doing ~5000 MH/s each, they'll cover ~5B nonces/sec
-    // Spacing of 1 trillion per GPU ensures no overlap for hours
-    const NONCE_SPACING = 1_000_000_000_000_000; // 1 quadrillion apart
+    const NONCE_SPACING = 1_000_000_000_000_000;
 
     const workers = [];
     let resolved = false;
@@ -133,7 +171,6 @@ function runMultiGpuMiner(gpus, challengeHex, difficultyHex, signal) {
     for (let i = 0; i < gpus.length; i++) {
       const gpu = gpus[i];
       const config = getGpuConfig(gpu);
-      // Random base + large offset per GPU
       const baseNonce = Math.floor(Math.random() * 1_000_000_000_000) + (i * NONCE_SPACING);
 
       const worker = launchGpuWorker(
@@ -141,11 +178,9 @@ function runMultiGpuMiner(gpus, challengeHex, difficultyHex, signal) {
       );
       workers.push(worker);
 
-      // When any GPU finds a nonce, kill all others
       worker.promise.then((nonce) => {
         if (!resolved) {
           resolved = true;
-          // Kill other GPU processes
           for (const w of workers) {
             if (w.deviceId !== worker.deviceId) {
               try { w.proc.kill("SIGKILL"); } catch (e) {}
@@ -154,8 +189,6 @@ function runMultiGpuMiner(gpus, challengeHex, difficultyHex, signal) {
           resolve(nonce);
         }
       }).catch((err) => {
-        // If a worker fails but others are still running, ignore
-        // If all fail, reject
         if (!resolved) {
           const allDead = workers.every(w => w.proc.killed || w.proc.exitCode !== null);
           if (allDead) {
@@ -165,7 +198,6 @@ function runMultiGpuMiner(gpus, challengeHex, difficultyHex, signal) {
       });
     }
 
-    // Handle abort (challenge changed)
     const onAbort = () => {
       if (!resolved) {
         resolved = true;
@@ -177,7 +209,6 @@ function runMultiGpuMiner(gpus, challengeHex, difficultyHex, signal) {
     };
     signal.addEventListener("abort", onAbort, { once: true });
 
-    // Cleanup listener when resolved
     Promise.allSettled(workers.map(w => w.promise)).then(() => {
       signal.removeEventListener("abort", onAbort);
     });
@@ -199,6 +230,8 @@ async function main() {
   console.log("Wallet:", wallet.address);
   console.log("Contract:", CONTRACT_ADDRESS);
   console.log("RPC:", RPC_URL);
+  console.log("Gas strategy:", GAS_TIP_GWEI ? `Fixed ${GAS_TIP_GWEI} gwei tip` : `${GAS_MULTIPLIER}x priority fee`);
+  console.log("Telegram:", TG_BOT_TOKEN ? "Enabled" : "Disabled");
   console.log("");
 
   // Detect and configure GPUs
@@ -218,19 +251,24 @@ async function main() {
   compileCuda(MINER_BIN, "cuda/keccak_miner.cu", ["-O3"]);
   console.log("CUDA binary ready.\n");
 
+  // Send startup notification
+  await sendTelegram(`⛏️ <b>Miner Started</b>\n\nGPUs: ${gpus.length}\nWallet: <code>${wallet.address}</code>`);
+
   let mineCount = 0;
+  let successCount = 0;
 
   while (true) {
     try {
       const state = await contract.miningState();
       const difficulty = BigInt(state.difficulty.toString());
       const challenge = await contract.getChallenge(wallet.address);
+      const rewardStr = ethers.formatUnits(state.reward, 18);
 
       console.log(`\n${"═".repeat(50)}`);
-      console.log(`Mining Round #${++mineCount}`);
+      console.log(`Mining Round #${++mineCount} | Wins: ${successCount}`);
       console.log(`${"═".repeat(50)}`);
       console.log("Era:", state.era.toString());
-      console.log("Reward:", ethers.formatUnits(state.reward, 18), "HASH");
+      console.log("Reward:", rewardStr, "HASH");
       console.log("Difficulty:", difficulty.toString());
       console.log("Epoch:", state.epoch.toString());
       console.log("Challenge:", challenge);
@@ -287,31 +325,51 @@ async function main() {
         continue;
       }
 
-      // Submit TX with competitive gas
+      // ─── Aggressive Gas Strategy ───────────────────────────────────────
       console.log("\nSubmitting mine(nonce) tx...");
       const feeData = await provider.getFeeData();
-      const maxPriorityFee = feeData.maxPriorityFeePerGas * 2n;
-      const maxFee = feeData.maxFeePerGas * 2n;
 
-      console.log(`  Gas: maxFee=${ethers.formatUnits(maxFee, "gwei")} gwei, priority=${ethers.formatUnits(maxPriorityFee, "gwei")} gwei`);
+      let maxPriorityFee;
+      if (GAS_TIP_GWEI) {
+        // Fixed tip mode
+        maxPriorityFee = ethers.parseUnits(GAS_TIP_GWEI, "gwei");
+      } else {
+        // Multiplier mode: network priority * multiplier, minimum 1 gwei
+        const basePriority = feeData.maxPriorityFeePerGas || ethers.parseUnits("0.1", "gwei");
+        maxPriorityFee = basePriority * GAS_MULTIPLIER;
+        const minTip = ethers.parseUnits("1", "gwei");
+        if (maxPriorityFee < minTip) maxPriorityFee = minTip;
+      }
+
+      // maxFee = baseFee * 2 + priority (ensures inclusion even if baseFee spikes)
+      const baseFee = feeData.maxFeePerGas - (feeData.maxPriorityFeePerGas || 0n);
+      const maxFee = baseFee * 2n + maxPriorityFee;
+
+      console.log(`  Priority: ${ethers.formatUnits(maxPriorityFee, "gwei")} gwei`);
+      console.log(`  MaxFee: ${ethers.formatUnits(maxFee, "gwei")} gwei`);
 
       const tx = await contract.mine(nonce, {
         maxFeePerGas: maxFee,
         maxPriorityFeePerGas: maxPriorityFee,
-        gasLimit: 200000n,
+        gasLimit: 150000n, // tighter limit = less risk
       });
       console.log("TX sent:", tx.hash);
 
-      // Wait with 60s timeout
+      // Wait with 45s timeout (faster retry on stuck TX)
       const receipt = await Promise.race([
         tx.wait(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("TX_TIMEOUT")), 60000))
+        new Promise((_, rej) => setTimeout(() => rej(new Error("TX_TIMEOUT")), 45000))
       ]);
 
       if (receipt.status === 1) {
+        successCount++;
         console.log(`\n🏆 SUCCESS! Mined in block ${receipt.blockNumber}`);
         console.log(`   Gas used: ${receipt.gasUsed.toString()}`);
         console.log(`   https://etherscan.io/tx/${tx.hash}`);
+        console.log(`   Total wins: ${successCount}`);
+
+        // Telegram notification (5 messages, 5s interval)
+        notifySuccess(receipt.blockNumber, receipt.gasUsed.toString(), tx.hash, rewardStr, elapsed);
       } else {
         console.log("TX reverted in block:", receipt.blockNumber);
       }
@@ -326,8 +384,8 @@ async function main() {
         continue;
       }
       console.error("Error:", err.shortMessage || err.message);
-      console.log("Retrying in 5s...");
-      await new Promise(r => setTimeout(r, 5000));
+      console.log("Retrying in 3s...");
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
 }
