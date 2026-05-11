@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <chrono>
-// Keccak-256 constants
+
+// Keccak-256 round constants
 __device__ __constant__ uint64_t RC[24] = {
     0x0000000000000001ULL, 0x0000000000008082ULL,
     0x800000000000808aULL, 0x8000000080008000ULL,
@@ -41,23 +42,23 @@ __device__ void keccak_f1600(uint64_t state[25]) {
         D[3] = C[2] ^ rotl64(C[4], 1);
         D[4] = C[3] ^ rotl64(C[0], 1);
 
-        state[0] ^= D[0]; state[5] ^= D[0]; state[10] ^= D[0]; state[15] ^= D[0]; state[20] ^= D[0];
-        state[1] ^= D[1]; state[6] ^= D[1]; state[11] ^= D[1]; state[16] ^= D[1]; state[21] ^= D[1];
-        state[2] ^= D[2]; state[7] ^= D[2]; state[12] ^= D[2]; state[17] ^= D[2]; state[22] ^= D[2];
-        state[3] ^= D[3]; state[8] ^= D[3]; state[13] ^= D[3]; state[18] ^= D[3]; state[23] ^= D[3];
-        state[4] ^= D[4]; state[9] ^= D[4]; state[14] ^= D[4]; state[19] ^= D[4]; state[24] ^= D[4];
+        state[0]  ^= D[0]; state[5]  ^= D[0]; state[10] ^= D[0]; state[15] ^= D[0]; state[20] ^= D[0];
+        state[1]  ^= D[1]; state[6]  ^= D[1]; state[11] ^= D[1]; state[16] ^= D[1]; state[21] ^= D[1];
+        state[2]  ^= D[2]; state[7]  ^= D[2]; state[12] ^= D[2]; state[17] ^= D[2]; state[22] ^= D[2];
+        state[3]  ^= D[3]; state[8]  ^= D[3]; state[13] ^= D[3]; state[18] ^= D[3]; state[23] ^= D[3];
+        state[4]  ^= D[4]; state[9]  ^= D[4]; state[14] ^= D[4]; state[19] ^= D[4]; state[24] ^= D[4];
 
         // Rho + Pi
-        B[0] = state[0];
-        B[1] = rotl64(state[6], 44);
-        B[2] = rotl64(state[12], 43);
-        B[3] = rotl64(state[18], 21);
-        B[4] = rotl64(state[24], 14);
-        B[5] = rotl64(state[3], 28);
-        B[6] = rotl64(state[9], 20);
-        B[7] = rotl64(state[10], 3);
-        B[8] = rotl64(state[16], 45);
-        B[9] = rotl64(state[22], 61);
+        B[0]  = state[0];
+        B[1]  = rotl64(state[6], 44);
+        B[2]  = rotl64(state[12], 43);
+        B[3]  = rotl64(state[18], 21);
+        B[4]  = rotl64(state[24], 14);
+        B[5]  = rotl64(state[3], 28);
+        B[6]  = rotl64(state[9], 20);
+        B[7]  = rotl64(state[10], 3);
+        B[8]  = rotl64(state[16], 45);
+        B[9]  = rotl64(state[22], 61);
         B[10] = rotl64(state[1], 1);
         B[11] = rotl64(state[7], 6);
         B[12] = rotl64(state[13], 25);
@@ -144,13 +145,13 @@ __device__ bool hash_less_than(const uint8_t *hash, const uint8_t *difficulty) {
 }
 
 __global__ void mine_kernel(
-    const uint8_t *challenge,    // 32 bytes
-    const uint8_t *difficulty,   // 32 bytes (big-endian)
+    const uint8_t *challenge,
+    const uint8_t *difficulty,
     uint64_t start_nonce,
     uint64_t *result_nonce,
     int *found
 ) {
-    uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t tid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t nonce = start_nonce + tid;
 
     if (*found) return;
@@ -164,7 +165,7 @@ __global__ void mine_kernel(
     }
 
     // Nonce as uint256 big-endian (pad with zeros on the left)
-    memset(input + 32, 0, 32);
+    memset(input + 32, 0, 24);
     input[56] = (uint8_t)(nonce >> 56);
     input[57] = (uint8_t)(nonce >> 48);
     input[58] = (uint8_t)(nonce >> 40);
@@ -187,7 +188,7 @@ __global__ void mine_kernel(
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <challenge_hex> <difficulty_hex> [start_nonce] [grid_size] [block_size]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <challenge_hex> <difficulty_hex> [start_nonce] [grid_size] [block_size] [device_id]\n", argv[0]);
         return 1;
     }
 
@@ -200,15 +201,18 @@ int main(int argc, char **argv) {
         challenge[i] = (uint8_t)byte;
     }
 
-    // Parse difficulty (64 hex chars = 32 bytes, big-endian)
+    // Parse difficulty (variable length hex, pad to 64 chars big-endian)
     const char *difficulty_hex = argv[2];
     uint8_t difficulty[32];
-    // Pad difficulty hex to 64 chars
     char diff_padded[65];
     int diff_len = strlen(difficulty_hex);
     memset(diff_padded, '0', 64);
     diff_padded[64] = '\0';
-    memcpy(diff_padded + (64 - diff_len), difficulty_hex, diff_len);
+    if (diff_len <= 64) {
+        memcpy(diff_padded + (64 - diff_len), difficulty_hex, diff_len);
+    } else {
+        memcpy(diff_padded, difficulty_hex + (diff_len - 64), 64);
+    }
     for (int i = 0; i < 32; i++) {
         unsigned int byte;
         sscanf(diff_padded + i * 2, "%02x", &byte);
@@ -216,12 +220,26 @@ int main(int argc, char **argv) {
     }
 
     uint64_t start_nonce = 0;
-    int grid_size = 256;
+    int grid_size = 512;
     int block_size = 256;
+    int device_id = 0;
 
     if (argc > 3) start_nonce = strtoull(argv[3], NULL, 10);
     if (argc > 4) grid_size = atoi(argv[4]);
     if (argc > 5) block_size = atoi(argv[5]);
+    if (argc > 6) device_id = atoi(argv[6]);
+
+    // Set GPU device
+    cudaError_t devErr = cudaSetDevice(device_id);
+    if (devErr != cudaSuccess) {
+        fprintf(stderr, "Failed to set CUDA device %d: %s\n", device_id, cudaGetErrorString(devErr));
+        return 1;
+    }
+
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device_id);
+    fprintf(stderr, "[GPU %d] %s | SMs: %d | Clock: %d MHz\n",
+            device_id, prop.name, prop.multiProcessorCount, prop.clockRate / 1000);
 
     uint64_t threads_per_batch = (uint64_t)grid_size * block_size;
 
@@ -241,53 +259,57 @@ int main(int argc, char **argv) {
     int found = 0;
     uint64_t result_nonce = 0;
     uint64_t total_hashes = 0;
-    uint64_t interval_hashes = 0;
 
     cudaMemcpy(d_found, &found, sizeof(int), cudaMemcpyHostToDevice);
 
-    fprintf(stderr, "GPU Mining started | Grid: %d | Block: %d | Threads/batch: %llu\n",
-            grid_size, block_size, (unsigned long long)threads_per_batch);
+    fprintf(stderr, "[GPU %d] Mining | Grid: %d | Block: %d | Batch: %llu threads\n",
+            device_id, grid_size, block_size, (unsigned long long)threads_per_batch);
 
     auto t_start = std::chrono::high_resolution_clock::now();
+    auto t_report = t_start;
 
     while (!found) {
         mine_kernel<<<grid_size, block_size>>>(
             d_challenge, d_difficulty, start_nonce, d_result_nonce, d_found
         );
+
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            fprintf(stderr, "CUDA Kernel Error: %s\n", cudaGetErrorString(err));
-            exit(1);
+            fprintf(stderr, "[GPU %d] Kernel Error: %s\n", device_id, cudaGetErrorString(err));
+            return 1;
         }
         cudaDeviceSynchronize();
 
         cudaMemcpy(&found, d_found, sizeof(int), cudaMemcpyDeviceToHost);
 
         total_hashes += threads_per_batch;
-        interval_hashes += threads_per_batch;
         start_nonce += threads_per_batch;
 
-        if (total_hashes % (threads_per_batch * 10) == 0) {
-            auto t_now = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> elapsed = t_now - t_start;
-            double mhs = (interval_hashes / 1000000.0) / elapsed.count();
-            
-            fprintf(stderr, "  [GPU] Hashes: %llu M | Power: %.2f MH/s\n", 
-                    (unsigned long long)(total_hashes / 1000000), mhs);
-            
-            t_start = std::chrono::high_resolution_clock::now();
-            interval_hashes = 0;
+        // Report every ~2 seconds
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double elapsed_report = std::chrono::duration<double>(t_now - t_report).count();
+        if (elapsed_report >= 2.0) {
+            double total_elapsed = std::chrono::duration<double>(t_now - t_start).count();
+            double mhs = (total_hashes / 1000000.0) / total_elapsed;
+            fprintf(stderr, "[GPU %d] %llu M hashes | %.2f MH/s\n",
+                    device_id, (unsigned long long)(total_hashes / 1000000), mhs);
+            t_report = t_now;
         }
     }
 
     cudaMemcpy(&result_nonce, d_result_nonce, sizeof(uint64_t), cudaMemcpyDeviceToHost);
 
-    // Output result to stdout (Node.js reads this)
-    printf("%llu\n", (unsigned long long)result_nonce);
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(t_end - t_start).count();
+    double final_mhs = (total_hashes / 1000000.0) / total_time;
 
-    fprintf(stderr, "Found nonce: %llu after %llu M hashes\n",
-            (unsigned long long)result_nonce,
-            (unsigned long long)(total_hashes / 1000000));
+    // Output nonce to stdout (Node.js reads this)
+    printf("%llu\n", (unsigned long long)result_nonce);
+    fflush(stdout);
+
+    fprintf(stderr, "[GPU %d] FOUND nonce: %llu | %llu M hashes | %.2f MH/s | %.2fs\n",
+            device_id, (unsigned long long)result_nonce,
+            (unsigned long long)(total_hashes / 1000000), final_mhs, total_time);
 
     cudaFree(d_challenge);
     cudaFree(d_difficulty);
