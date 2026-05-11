@@ -455,9 +455,13 @@ class ChallengeWatcher {
       this.currentDifficulty = BigInt(state.difficulty.toString());
       this.currentReward = state.reward;
       this.currentEpoch = state.epoch;
-      if (changed && this.onChange) this.onChange(challenge);
+      if (changed && this.onChange) {
+        this.onChange(challenge);
+      } else if (this.currentChallenge) {
+        console.log(`[CHECK] Challenge still valid | Epoch: ${state.epoch.toString()}`);
+      }
     } catch (err) {
-      // ignore transient errors
+      console.log(`[CHECK] RPC error: ${err.message ? err.message.slice(0, 50) : "unknown"}`);
     }
   }
 
