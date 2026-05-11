@@ -238,8 +238,8 @@ int main(int argc, char **argv) {
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, device_id);
-    fprintf(stderr, "[GPU %d] %s | SMs: %d | Clock: %d MHz\n",
-            device_id, prop.name, prop.multiProcessorCount, prop.clockRate / 1000);
+    fprintf(stderr, "[GPU %d] %s | SMs: %d\n",
+            device_id, prop.name, prop.multiProcessorCount);
 
     uint64_t threads_per_batch = (uint64_t)grid_size * block_size;
 

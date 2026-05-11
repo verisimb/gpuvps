@@ -17,12 +17,11 @@ int main() {
     for (int i = 0; i < deviceCount; i++) {
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, i);
-        printf("%d,%s,%d,%d,%d\n",
+        printf("%d,%s,%d,%d\n",
             i,
             prop.name,
             prop.multiProcessorCount,
-            prop.maxThreadsPerBlock,
-            prop.clockRate / 1000);
+            prop.maxThreadsPerBlock);
     }
 
     return 0;

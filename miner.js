@@ -61,13 +61,12 @@ function detectGpus() {
         name: parts[1],
         smCount: parseInt(parts[2]),
         maxThreads: parseInt(parts[3]),
-        clockMhz: parseInt(parts[4]),
       });
     }
   } catch (err) {
     console.error("Failed to detect GPUs:", err.message);
     // Fallback: assume 1 GPU
-    gpus = [{ id: 0, name: "Unknown", smCount: 64, maxThreads: 1024, clockMhz: 2000 }];
+    gpus = [{ id: 0, name: "Unknown", smCount: 64, maxThreads: 1024 }];
   }
 
   return gpus;
@@ -210,7 +209,7 @@ async function main() {
     const config = getGpuConfig(gpu);
     const threadsPerBatch = config.gridSize * config.blockSize;
     totalThreadsPerBatch += threadsPerBatch;
-    console.log(`  [GPU ${gpu.id}] ${gpu.name} | ${gpu.smCount} SMs | ${gpu.clockMhz} MHz | Grid: ${config.gridSize}x${config.blockSize} = ${(threadsPerBatch / 1000000).toFixed(1)}M threads/batch`);
+    console.log(`  [GPU ${gpu.id}] ${gpu.name} | ${gpu.smCount} SMs | Grid: ${config.gridSize}x${config.blockSize} = ${(threadsPerBatch / 1000000).toFixed(1)}M threads/batch`);
   }
   console.log(`  Total parallel threads: ${(totalThreadsPerBatch / 1000000).toFixed(1)}M per batch`);
   console.log("");
