@@ -395,8 +395,11 @@ class MempoolMonitor {
         console.log("Mempool WS error:", err.message);
       });
       this.ws.on("close", () => {
-        console.log("Mempool WS closed, reconnecting in 3s...");
-        setTimeout(() => this.start(), 3000);
+        if (!this._loggedReconnect) {
+          console.log("Mempool WS: reconnecting (further reconnects silent)");
+          this._loggedReconnect = true;
+        }
+        setTimeout(() => this.start(), 5000);
       });
     } catch (err) {
       console.log("Mempool monitor init failed:", err.message);
@@ -428,20 +431,20 @@ class ChallengeWatcher {
 
   async start() {
     await this.refresh();
-    this.blockHandler = async () => {
-      await this.refresh();
-    };
+    // Always start polling as reliable fallback
+    this.startPolling();
+    // Also try WS block subscription for faster detection
     try {
+      this.blockHandler = async () => { await this.refresh(); };
       this.wsProvider.on("block", this.blockHandler);
-      console.log("Block watcher: subscribed to new blocks");
+      console.log("Block watcher: WS subscribed + polling every 2s");
     } catch (err) {
-      console.log("Block watcher WS failed, falling back to polling:", err.message);
-      this.startPolling();
+      console.log("Block watcher: WS failed, using polling only:", err.message);
     }
   }
 
   startPolling() {
-    this.pollTimer = setInterval(() => { this.refresh().catch(() => {}); }, 1500);
+    this.pollTimer = setInterval(() => { this.refresh().catch(() => {}); }, 2000);
   }
 
   async refresh() {
