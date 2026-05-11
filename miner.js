@@ -280,6 +280,13 @@ async function main() {
       console.log("Hash:", hash);
       console.log("Local verification: OK");
 
+      // Re-check challenge before spending gas
+      const freshChallenge = await contract.getChallenge(wallet.address);
+      if (freshChallenge !== challenge) {
+        console.log("Challenge changed before TX submit. Skipping stale nonce...");
+        continue;
+      }
+
       // Submit TX with competitive gas
       console.log("\nSubmitting mine(nonce) tx...");
       const feeData = await provider.getFeeData();
