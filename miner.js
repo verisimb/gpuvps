@@ -12,8 +12,8 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = "0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc";
 
 // Telegram config
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "8613318244:AAEA1Dv_4xxsAsEH9dV_v4eboS6LHQuAtoQ";
-const TG_CHAT_ID = process.env.TG_CHAT_ID || "1759703621";
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 // Gas strategy: how aggressive to bid
 const GAS_MULTIPLIER = BigInt(process.env.GAS_MULTIPLIER || "5"); // 5x priority fee
