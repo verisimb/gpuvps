@@ -50,7 +50,7 @@ function setupGpu() {
   if (!GPU_BLOCK) GPU_BLOCK = Math.min(256, maxThreads).toString();
   if (!GPU_GRID) GPU_GRID = (smCount * 4096).toString();
   
-  compileCuda(MINER_BIN, "cuda/keccak_miner.cu", ["-O3", "-arch=native"]);
+  compileCuda(MINER_BIN, "cuda/keccak_miner.cu", ["-O3"]);
 }
 
 const ABI = [
