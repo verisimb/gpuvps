@@ -1,0 +1,20 @@
+{
+  "name": "hash256-gpu",
+  "version": "1.0.0",
+  "description": "CUDA GPU miner for HASH256 on Ethereum mainnet.",
+  "main": "miner.js",
+  "scripts": {
+    "build": "nvcc -O3 -o keccak_miner cuda/keccak_miner.cu",
+    "start": "node miner.js",
+    "check": "node check-state.js"
+  },
+  "keywords": ["hash256", "ethereum", "miner", "gpu", "cuda"],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
